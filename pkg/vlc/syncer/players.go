@@ -5,15 +5,17 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/instance"
 	"golang.org/x/sync/errgroup"
 )
 
 type players struct {
-	items        []*player
-	mu           sync.RWMutex
-	waitCtx      context.Context
-	waitErrGroup *errgroup.Group
-	updatesChan  chan<- playerUpdate
+	items         []*player
+	mu            sync.RWMutex
+	waitCtx       context.Context
+	waitErrGroup  *errgroup.Group
+	onUpdate      func(playerUpdate)
+	onPlayerEvent func(playerEvent)
 }
 
 func newPlayers(items ...*player) *players {
@@ -34,7 +36,10 @@ func (s *players) Add(item *player) {
 	defer s.mu.Unlock()
 	s.items = append(s.items, item)
 	if s.waitErrGroup != nil {
-		item.StartWaiting(s.waitCtx, s.waitErrGroup.Go, s.updatesChan)
+		onEvent := func(event instance.StdErrEvent) {
+			s.onPlayerEvent(playerEvent{event: event, player: item})
+		}
+		item.StartWaiting(s.waitCtx, s.waitErrGroup.Go, s.onUpdate, onEvent)
 	}
 }
 
@@ -48,17 +53,25 @@ func (s *players) Iterate(yield func(*player) (next bool)) {
 	}
 }
 
-func (s *players) WaitAndPoll(ctx context.Context, updatesReceiver chan<- playerUpdate) error {
+func (s *players) WaitAndPoll(
+	ctx context.Context,
+	onUpdate func(update playerUpdate),
+	onPlayerEvent func(event playerEvent),
+) error {
 	s.mu.Lock()
 	if s.waitErrGroup != nil {
 		return errors.New("already waiting")
 	}
 
+	s.onUpdate = onUpdate
+	s.onPlayerEvent = onPlayerEvent
 	s.waitErrGroup, s.waitCtx = errgroup.WithContext(ctx)
-	s.updatesChan = updatesReceiver
 
 	for _, pl := range s.items {
-		pl.StartWaiting(s.waitCtx, s.waitErrGroup.Go, s.updatesChan)
+		onEvent := func(event instance.StdErrEvent) {
+			onPlayerEvent(playerEvent{event: event, player: pl})
+		}
+		pl.StartWaiting(s.waitCtx, s.waitErrGroup.Go, onUpdate, onEvent)
 	}
 	s.mu.Unlock()
 
@@ -67,8 +80,6 @@ func (s *players) WaitAndPoll(ctx context.Context, updatesReceiver chan<- player
 	s.mu.Lock()
 	s.waitCtx = nil
 	s.waitErrGroup = nil
-	close(s.updatesChan)
-	s.updatesChan = nil
 	s.mu.Unlock()
 
 	return err

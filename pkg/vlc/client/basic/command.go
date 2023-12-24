@@ -28,6 +28,12 @@ func ResumeCmd() Command {
 	}
 }
 
+func PauseResumeCmd() Command {
+	return Command{
+		KeyCommand: "pl_pause",
+	}
+}
+
 func StopCmd() Command {
 	return Command{
 		KeyCommand: "pl_stop",

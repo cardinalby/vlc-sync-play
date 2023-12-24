@@ -1,6 +1,7 @@
 package basic
 
 import (
+	"fmt"
 	"time"
 
 	timeutil "github.com/cardinalby/vlc-sync-play/pkg/util/time"
@@ -32,4 +33,9 @@ func (s Status) GetLength() time.Duration {
 type StatusEx struct {
 	Status
 	FileURI string
+}
+
+func (s StatusEx) String() string {
+	return fmt.Sprintf("Status{LengthSec: %d, Rate: %f, State: %s, Position: %f, FileURI: %s, Moment: %s - %s}",
+		s.LengthSec, s.Rate, s.State, s.Position, s.FileURI, s.Moment.Min, s.Moment.Max)
 }

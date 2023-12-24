@@ -2,54 +2,49 @@ package syncer
 
 import (
 	"context"
-	"fmt"
 	"time"
 
+	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
+	typeutil "github.com/cardinalby/vlc-sync-play/pkg/util/rx"
 	timeutil "github.com/cardinalby/vlc-sync-play/pkg/util/time"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/extended"
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/timings"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/state"
 )
 
-var index int
-
 type Client struct {
-	// todo: remove index
-	index           int
 	client          *extended.Client
-	pollingInterval time.Duration
+	pollingInterval typeutil.Observable[time.Duration]
 	state           *state.State
-	updatesChan     chan state.Update
+	logger          logging.Logger
 }
 
 func newClient(
 	client *extended.Client,
-	pollingInterval time.Duration,
+	pollingInterval typeutil.Observable[time.Duration],
+	logger logging.Logger,
 ) *Client {
-	index++
 	return &Client{
-		index:           index,
 		client:          client,
 		pollingInterval: pollingInterval,
-		state:           state.NewState(),
-		updatesChan:     make(chan state.Update),
+		state:           state.NewState(logger),
+		logger:          logger,
 	}
 }
 
-func (c *Client) StartPolling(ctx context.Context) error {
-	defer func() {
-		close(c.updatesChan)
-	}()
-
+func (c *Client) StartPolling(ctx context.Context, onUpdate func(state.Update)) error {
 	for {
 		newStatus, err := c.client.GetStatusEx(ctx)
 		if err == nil {
-			_ = c.onNewStatus(ctx, newStatus)
+			if err := c.onNewStatus(ctx, newStatus, onUpdate); err != nil {
+				return err
+			}
 		} else if !c.client.IsRecoverableErr(err) {
 			// Not recoverable
 			return err
 		}
-		if err := timeutil.SleepCtx(ctx, c.pollingInterval); err != nil {
+		if err := timeutil.SleepCtx(ctx, c.pollingInterval.GetValue()); err != nil {
 			// Not recoverable
 			return err
 		}
@@ -60,7 +55,7 @@ func (c *Client) SendCmdGroup(
 	ctx context.Context,
 	group extended.CmdGroup,
 ) (statusEx *basic.StatusEx, shouldRepeat bool) {
-	fmt.Printf("Client %d: SendCmdGroup\n", c.index)
+	c.logger.Info("SendCmdGroup")
 	res, err := c.client.SendCmdGroup(ctx, group)
 	if res != nil {
 		c.state.ApplyNewStatus(res)
@@ -68,15 +63,28 @@ func (c *Client) SendCmdGroup(
 	return res, err != nil && c.client.IsRecoverableErr(err)
 }
 
-func (c *Client) onNewStatus(ctx context.Context, newStatus basic.StatusEx) (err error) {
-	update, err := c.state.ApplyNewStatusAndGetUpdate(&newStatus)
-	if err != nil || !update.ChangedProps.HasAny() {
+func (c *Client) onNewStatus(
+	ctx context.Context,
+	newStatus basic.StatusEx,
+	onUpdate func(state.Update),
+) error {
+	oldStateStr := c.state.String()
+	update, err := c.state.GetUpdate(&newStatus)
+	c.state.ApplyNewStatus(&newStatus)
+	if err != nil || !update.ChangedProps.HasAny() || update.IsNatural {
 		// ignore errors or no changes
 		return nil
 	}
-	select {
-	case c.updatesChan <- update:
-	case <-ctx.Done():
+
+	c.logger.Info("Update: %s. \nOld: %s, \nNew: %s", &update, oldStateStr, c.state)
+	onUpdate(update)
+
+	if update.ChangedProps.HasFileURI() {
+		durationSinceFileOpened := time.Since(newStatus.Moment.Center())
+		if err := timeutil.SleepCtx(ctx, timings.WaitForAutoSeekAfterFileOpenedDuration-durationSinceFileOpened); err != nil {
+			return err
+		}
 	}
-	return ctx.Err()
+
+	return nil
 }

@@ -12,21 +12,9 @@ type Update struct {
 	Status       basic.StatusEx
 }
 
-func newFullManualUpdate(new *basic.StatusEx) Update {
-	upd := Update{
-		Status: *new,
-	}
-	upd.ChangedProps.SetState(true)
-	if new.State == basic.PlaybackStateStopped {
-		return upd
-	}
-	upd.ChangedProps.SetFileURI(true)
-	upd.ChangedProps.SetPosition(true)
-	upd.ChangedProps.SetRate(true)
-	upd.IsNatural = false
-	return upd
-}
-
 func (d *Update) String() string {
-	return fmt.Sprintf("natural: %v, %s", d.IsNatural, d.ChangedProps.String())
+	if !d.IsNatural {
+		return d.ChangedProps.String()
+	}
+	return fmt.Sprintf("NATURAL: %s", d.ChangedProps.String())
 }

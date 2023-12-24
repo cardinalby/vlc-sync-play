@@ -2,18 +2,19 @@ package extended
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
+	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
 	mathutil "github.com/cardinalby/vlc-sync-play/pkg/util/math"
+	timeutil "github.com/cardinalby/vlc-sync-play/pkg/util/time"
 	typeutil "github.com/cardinalby/vlc-sync-play/pkg/util/type"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic"
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/timings"
 	"golang.org/x/sync/errgroup"
 )
 
 const respTimeSamplesCount = 10
-const respTimeDefaultValue = 20 * time.Millisecond
 
 type lastStatusPart struct {
 	Filename  string
@@ -26,13 +27,23 @@ type Client struct {
 	mu             sync.Mutex
 	statusRespTime *mathutil.AvgAcc[time.Duration]
 	lastStatusPart typeutil.Optional[lastStatusPart]
+	logger         logging.Logger
 }
 
-func NewClient(api basic.ApiClient) *Client {
-	return &Client{
+func CreateClientWaitOnline(
+	ctx context.Context,
+	api basic.ApiClient,
+	logger logging.Logger,
+) (*Client, error) {
+	client := &Client{
 		api:            api,
-		statusRespTime: mathutil.NewAvgAcc[time.Duration](respTimeSamplesCount, respTimeDefaultValue),
+		statusRespTime: mathutil.NewAvgAcc[time.Duration](respTimeSamplesCount),
+		logger:         logger,
 	}
+	if err := client.waitUntilOnline(ctx); err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 func (c *Client) GetStatusEx(ctx context.Context) (basic.StatusEx, error) {
@@ -75,15 +86,15 @@ func (c *Client) SendCmdGroup(ctx context.Context, group CmdGroup) (res *basic.S
 			return nil, err
 		}
 
-		// todo: trying to cope with vlc no progress showing
+		// Ensure that file is opened
 		for statusEx.FileURI != targetFileURI {
-			fmt.Printf("=== Client: waiting for file change\n")
-			time.Sleep(time.Second)
-			statusEx, err = c.GetStatusEx(ctx)
-			if err != nil {
+			if err := timeutil.SleepCtx(ctx, timings.StatusClarificationInterval); err != nil {
 				return nil, err
 			}
-			time.Sleep(time.Second)
+			statusEx, err = c.GetStatusEx(ctx)
+			if err := updateRes(statusEx, err); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -112,7 +123,11 @@ func (c *Client) SendCmdGroup(ctx context.Context, group CmdGroup) (res *basic.S
 }
 
 func (c *Client) getCmdExpectedExecutionTime() time.Time {
-	return time.Now().Add(c.statusRespTime.Avg() / 2)
+	if avg, ok := c.statusRespTime.Avg(); ok {
+		return time.Now().Add(avg / 2)
+	}
+	// should not happen
+	return time.Now()
 }
 
 func (c *Client) getStatusEx(ctx context.Context, status basic.Status) (basic.StatusEx, error) {
@@ -150,4 +165,22 @@ func (c *Client) getStatusEx(ctx context.Context, status basic.Status) (basic.St
 
 func (c *Client) IsRecoverableErr(err error) bool {
 	return c.api.IsRecoverableErr(err)
+}
+
+func (c *Client) waitUntilOnline(ctx context.Context) error {
+	c.logger.Info("* waiting until online")
+	for {
+		status, err := c.api.GetStatus(ctx)
+		if err == nil {
+			c.statusRespTime.Add(status.Moment.Length())
+			c.logger.Info(" * online")
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := timeutil.SleepCtx(ctx, timings.WaitUntilOnlinePollingInterval); err != nil {
+			return err
+		}
+	}
 }

@@ -2,15 +2,19 @@ package instance
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"os/exec"
 
-	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic"
+	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/extended"
+	"golang.org/x/sync/errgroup"
 )
 
 type Instance struct {
-	ApiClient basic.ApiClient
-	Cmd       *exec.Cmd
+	Client       *extended.Client
+	Cmd          *exec.Cmd
+	stdErrParser *OutputParser
+	logger       logging.Logger
 }
 
 func (i Instance) GetPID() int {
@@ -31,19 +35,30 @@ func (i Instance) Stop() error {
 	return nil
 }
 
-func (i Instance) Wait(ctx context.Context) error {
-	waitRes := make(chan error, 1)
-	go func() {
-		waitRes <- i.Cmd.Wait()
-		close(waitRes)
-	}()
+func (i Instance) SetEventsToParse(events EventsToParse) {
+	i.stdErrParser.SetEventsToParse(events)
+}
 
-	select {
-	case <-ctx.Done():
-		fmt.Printf("context done, killing process %d\n", i.GetPID())
+func (i Instance) Wait(ctx context.Context, onStderrEvent func(event StdErrEvent)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	errGr, ctx := errgroup.WithContext(ctx)
+
+	errGr.Go(func() error {
+		return i.stdErrParser.Start(ctx, onStderrEvent)
+	})
+	errGr.Go(func() error {
+		defer cancel()
+		return i.Cmd.Wait()
+	})
+	errGr.Go(func() error {
+		<-ctx.Done()
 		_ = i.Stop()
 		return ctx.Err()
-	case err := <-waitRes:
-		return err
+	})
+
+	err := errGr.Wait()
+	if errors.Is(err, ctx.Err()) {
+		return nil
 	}
+	return err
 }

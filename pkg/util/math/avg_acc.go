@@ -6,14 +6,12 @@ import (
 
 type AvgAcc[T Numeric] struct {
 	maxSamplesCount int
-	defaultValue    T
 	samples         *deque.Deque[T]
 }
 
-func NewAvgAcc[T Numeric](maxSamplesCount int, defaultValue T) *AvgAcc[T] {
+func NewAvgAcc[T Numeric](maxSamplesCount int) *AvgAcc[T] {
 	return &AvgAcc[T]{
 		maxSamplesCount: maxSamplesCount,
-		defaultValue:    defaultValue,
 		samples:         deque.New[T](maxSamplesCount),
 	}
 }
@@ -25,14 +23,14 @@ func (a *AvgAcc[T]) Add(value T) {
 	a.samples.PushBack(value)
 }
 
-func (a *AvgAcc[T]) Avg() T {
+func (a *AvgAcc[T]) Avg() (T, bool) {
 	var sum T
 	length := a.samples.Len()
 	if length == 0 {
-		return a.defaultValue
+		return 0, false
 	}
 	for i := 0; i < length; i++ {
 		sum += a.samples.At(i)
 	}
-	return sum / T(length)
+	return sum / T(length), true
 }

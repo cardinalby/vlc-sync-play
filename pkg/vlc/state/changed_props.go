@@ -83,3 +83,12 @@ func (cp *ChangedProps) Union(another ChangedProps) ChangedProps {
 	}
 	return another
 }
+
+func (cp *ChangedProps) Includes(another ChangedProps) bool {
+	for i := 0; i < len(another); i++ {
+		if another[i] && !cp[i] {
+			return false
+		}
+	}
+	return true
+}

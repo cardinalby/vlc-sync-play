@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
 	osutil "github.com/cardinalby/vlc-sync-play/pkg/util/os"
 	rndutil "github.com/cardinalby/vlc-sync-play/pkg/util/rnd"
 	timeutil "github.com/cardinalby/vlc-sync-play/pkg/util/time"
@@ -27,30 +28,38 @@ const apiEndpointPlaylist = "playlist.json"
 // BasicApiClient is a client for the VLC HTTP JSON API.
 // See: https://github.com/videolan/vlc/tree/master/share/lua/http/requests
 type BasicApiClient struct {
+	logger         logging.Logger
 	connectionInfo ConnectionInfo
 	baseUrl        string
 	authHeader     string
 }
 
-func NewLocalBasicApiClient() (*BasicApiClient, error) {
+func NewLocalBasicApiClient(logger logging.Logger) (*BasicApiClient, error) {
 	password := rndutil.GeneratePassword(passwordLength)
 	host, port, err := osutil.GetFreePort()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get free port: %w", err)
 	}
-	return NewBasicApiClient(ConnectionInfo{
-		Host:     host,
-		Port:     port,
-		Password: password,
-	}), nil
+	return newBasicApiClient(
+		ConnectionInfo{
+			Host:     host,
+			Port:     port,
+			Password: password,
+		},
+		logger,
+	), nil
 }
 
-func NewBasicApiClient(connectionInfo ConnectionInfo) *BasicApiClient {
+func newBasicApiClient(
+	connectionInfo ConnectionInfo,
+	logger logging.Logger,
+) *BasicApiClient {
 	//goland:noinspection HttpUrlsUsage
 	return &BasicApiClient{
 		connectionInfo: connectionInfo,
 		baseUrl:        fmt.Sprintf("http://%s:%d/requests/", connectionInfo.Host, connectionInfo.Port),
 		authHeader:     "Basic " + base64.StdEncoding.EncodeToString([]byte(":"+connectionInfo.Password)),
+		logger:         logger,
 	}
 }
 
@@ -68,7 +77,7 @@ func (apiClient *BasicApiClient) GetStatus(ctx context.Context) (basic.Status, e
 }
 
 func (apiClient *BasicApiClient) SendStatusCmd(ctx context.Context, cmd basic.Command) (basic.Status, error) {
-	fmt.Printf("%s SendStatusCmd: %v\n", apiClient.baseUrl, cmd)
+	apiClient.logger.Info("CMD %s %v\n", apiClient.baseUrl, cmd)
 	statusDto, moment, err := sendApiRequest[statusDto](
 		ctx,
 		apiClient,

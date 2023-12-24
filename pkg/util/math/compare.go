@@ -5,16 +5,50 @@ type Numeric interface {
 		~float32 | ~float64
 }
 
-func Max[T Numeric](lhs, rhs T) T {
-	if lhs > rhs {
-		return lhs
+func Abs[T Numeric](value T) T {
+	if value < 0 {
+		return -value
 	}
-	return rhs
+	return value
 }
 
-func Min[T Numeric](lhs, rhs T) T {
-	if lhs < rhs {
-		return lhs
+func Max[T Numeric](first T, other ...T) T {
+	max := first
+
+	for _, value := range other {
+		if value > max {
+			max = value
+		}
 	}
-	return rhs
+
+	return max
+}
+
+func Min[T Numeric](first T, other ...T) T {
+	min := first
+
+	for _, value := range other {
+		if value < min {
+			min = value
+		}
+	}
+
+	return min
+}
+
+func NearestIndex[T Numeric](values []T, target T) int {
+	if len(values) == 0 {
+		return -1
+	}
+	minDiff := Abs(values[0] - target)
+	minDiffIndex := 0
+
+	for i := 1; i < len(values); i++ {
+		if diff := Abs(values[i] - target); diff < minDiff {
+			minDiff = diff
+			minDiffIndex = i
+		}
+	}
+
+	return minDiffIndex
 }
