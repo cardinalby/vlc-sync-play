@@ -8,49 +8,59 @@ import (
 	"time"
 
 	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
-	timeutil "github.com/cardinalby/vlc-sync-play/pkg/util/time"
 	typeutil "github.com/cardinalby/vlc-sync-play/pkg/util/type"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/extended"
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/extended/repetition"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/timings"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/instance"
 	"golang.org/x/sync/errgroup"
 )
 
 type Syncer struct {
-	syncingMu              sync.Mutex
-	lastPlayerId           uint
-	players                *players
-	settings               Settings
-	lastSyncedAt           time.Time
-	isWaitingForUpdateFrom *player // pause sync until got update from this player
-	isStarted              atomic.Bool
-	instanceLauncher       instance.Launcher
-	logger                 logging.Logger
+	syncingMu                    sync.Mutex
+	players                      *players
+	settings                     Settings
+	followersSkipUpdatesDuration time.Duration
+	state                        State
+	isStarted                    atomic.Bool
+	instanceLauncher             instance.Launcher
+	logger                       logging.Logger
 }
 
 func NewSyncer(
-	masterInstance instance.Instance,
 	settings Settings,
 	instanceLauncher instance.Launcher,
 	logger logging.Logger,
 ) *Syncer {
 	return &Syncer{
-		players: newPlayers(newPlayer(
-			masterInstance,
-			getPlayerSettings(settings),
-			logger,
-			0,
-		)),
-		settings:         settings,
+		players:  newPlayers(),
+		settings: settings,
+		followersSkipUpdatesDuration: timings.GetFollowerUpdatesIgnoreDuration(
+			settings.GetPollingInterval().GetValue(),
+		),
+		state:            NewState(),
 		instanceLauncher: instanceLauncher,
 		logger:           logger,
-		lastPlayerId:     0,
 	}
 }
 
-func (s *Syncer) Start(ctx context.Context) error {
+func (s *Syncer) Start(ctx context.Context, initFileURI string) error {
+	if err := s.launchInstances(ctx, initFileURI, 1); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
+
+	defer s.settings.GetInstancesNumber().Subscribe(func(value int) {
+		s.launchMissingInstances(ctx, value)
+	}).Unsubscribe()
+
+	defer s.settings.GetPollingInterval().Subscribe(func(value time.Duration) {
+		s.syncingMu.Lock()
+		defer s.syncingMu.Unlock()
+		s.followersSkipUpdatesDuration = timings.GetFollowerUpdatesIgnoreDuration(value)
+	})
 
 	return s.players.WaitAndPoll(
 		ctx,
@@ -64,6 +74,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 				cancel()
 			}
 		},
+		s.onFinished,
 	)
 }
 
@@ -74,6 +85,15 @@ func (s *Syncer) onEvent(ctx context.Context, event playerEvent) error {
 		s.sendAllPlayersCommands(ctx, commands)
 	}
 	return nil
+}
+
+func (s *Syncer) onFinished(pl *player) {
+	s.logger.Info("P[%d]: finished", pl.GetID())
+	s.syncingMu.Lock()
+	defer s.syncingMu.Unlock()
+	if s.state.lastSyncedFromID == pl.GetID() {
+		s.state.lastSyncedFromID = instance.IDNone
+	}
 }
 
 func (s *Syncer) sendAllPlayersCommands(
@@ -88,14 +108,7 @@ func (s *Syncer) sendAllPlayersCommands(
 		waitGr.Add(1)
 		go func() {
 			defer waitGr.Done()
-			for {
-				if _, shouldRepeat := pl.SendCmdGroup(ctx, commands); !shouldRepeat || ctx.Err() != nil {
-					return
-				}
-				if err := timeutil.SleepCtx(ctx, timings.CommandsRepeatInterval); err != nil {
-					return
-				}
-			}
+			_, _ = pl.SendCmdGroup(ctx, commands, repetition.WithInterval(timings.CommandsRepeatInterval))
 		}()
 		return true
 	})
@@ -108,31 +121,18 @@ func (s *Syncer) onUpdate(ctx context.Context, plUpdate *playerUpdate) error {
 	s.syncingMu.Lock()
 	defer s.syncingMu.Unlock()
 
-	if s.isWaitingForUpdateFrom != nil && s.isWaitingForUpdateFrom != plUpdate.player {
-		s.logger.Info("Skipping [%d] update because is waiting only from %d",
-			plUpdate.player.id, s.isWaitingForUpdateFrom.id)
-		return nil
-	}
-	if plUpdate.update.Status.Moment.Center().Before(s.lastSyncedAt) {
-		s.logger.Info("Skipping [%d] update from %v old sync iteration: pos %v",
-			plUpdate.player.id, s.lastSyncedAt.Sub(plUpdate.update.Status.Moment.Max), plUpdate.update.Status.Position)
+	if canAccept, getReason := s.checkCanAcceptUpdate(plUpdate); !canAccept {
+		s.logger.Info(getReason())
 		return nil
 	}
 
+	s.state.fileURI.SetValue(plUpdate.update.Status.FileURI)
+	s.state.lastSyncedFromID = plUpdate.player.GetID()
+
 	if plUpdate.update.ChangedProps.HasFileURI() &&
 		plUpdate.update.Status.State != basic.PlaybackStateStopped {
-		// File opened
-		s.isWaitingForUpdateFrom = plUpdate.player
-		missingInstancesNumber := s.settings.GetInstancesNumber().GetValue() - s.players.Len()
-		if missingInstancesNumber > 0 {
-			return s.launchAdditionalInstances(
-				ctx,
-				plUpdate.update.Status.FileURI,
-				missingInstancesNumber,
-			)
-		}
-	} else {
-		s.isWaitingForUpdateFrom = nil
+		s.onFileOpened(ctx, plUpdate.player.GetID())
+		return nil
 	}
 
 	if !plUpdate.update.IsNatural {
@@ -141,54 +141,126 @@ func (s *Syncer) onUpdate(ctx context.Context, plUpdate *playerUpdate) error {
 	return nil
 }
 
-func (s *Syncer) launchAdditionalInstances(
+func (s *Syncer) checkCanAcceptUpdate(plUpdate *playerUpdate) (canAccept bool, getReason func() string) {
+	plID := plUpdate.player.GetID()
+	if plID == s.state.lastSyncedFromID || s.state.lastSyncedFromID == instance.IDNone {
+		return true, nil
+	}
+
+	if plUpdate.update.Status.Moment.Center().Before(s.state.acceptFollowerUpdatesAfter) {
+		return false, func() string {
+			return fmt.Sprintf("Skipping [%d] update from %v old sync iteration: pos %v",
+				plUpdate.player.GetID(),
+				s.state.acceptFollowerUpdatesAfter.Sub(plUpdate.update.Status.Moment.Max),
+				plUpdate.update.Status.Position,
+			)
+		}
+	}
+	return true, nil
+}
+
+func (s *Syncer) launchMissingInstances(ctx context.Context, targetInstancesNumber int) {
+	missing := targetInstancesNumber - s.players.Len()
+	if missing <= 0 {
+		return
+	}
+
+	if fileURI := s.state.fileURI.GetValue(); fileURI != "" {
+		_ = s.launchInstances(ctx, fileURI, missing)
+	} else {
+		defer s.state.fileURI.Subscribe(func(fileURI string) {
+			_ = s.launchInstances(ctx, fileURI, missing)
+		}).Unsubscribe()
+	}
+	return
+}
+
+func (s *Syncer) launchInstances(
 	ctx context.Context,
-	openFile string,
+	fileURI string,
 	missingInstancesNumber int,
 ) error {
 	options := instance.LaunchOptions{
-		NoVideo: s.settings.GetNoVideo().GetValue(),
-	}
-	if openFile != "" {
-		options.FilePaths = []string{openFile}
+		// First instance will be launched with video
+		NoVideo: s.players.Len() > 0 && s.settings.GetNoVideo().GetValue(),
+		FileURI: typeutil.Optional[string]{
+			HasValue: fileURI != "",
+			Value:    fileURI,
+		},
 	}
 	errGr := errgroup.Group{}
 
 	for i := 0; i < missingInstancesNumber; i++ {
 		errGr.Go(func() error {
-			newInstance, err := s.instanceLauncher(ctx, options)
+			s.logger.Info("Launching new instance")
+
+			newInstance, err := s.instanceLauncher.Launch(ctx, options)
 			if err != nil {
 				return fmt.Errorf("failed to create new instance: %w", err)
 			}
-			s.lastPlayerId++
-			newPlayer := newPlayer(
+			s.players.Add(newPlayer(
 				newInstance,
 				getPlayerSettings(s.settings),
 				s.logger,
-				s.lastPlayerId,
-			)
-			s.players.Add(newPlayer)
+			))
 			return nil
 		})
 	}
 	return errGr.Wait()
 }
 
+func (s *Syncer) onFileOpened(ctx context.Context, srcPlayerID uint) {
+	// The source player may auto-seek and will send the next update with other properties
+	s.state.acceptFollowerUpdatesAfter = time.Now().Add(max(
+		s.followersSkipUpdatesDuration,
+		timings.WaitForAutoSeekAfterFileOpenedDuration,
+	))
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.launchMissingInstances(
+			ctx,
+			s.settings.GetInstancesNumber().GetValue(),
+		)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.players.Iterate(func(pl *player) bool {
+			if pl.GetID() != srcPlayerID {
+				_, _ = pl.SendCmdGroup(
+					ctx,
+					extended.CmdGroup{
+						OpenFile: typeutil.NewOptional(s.state.fileURI.GetValue()),
+					},
+					repetition.WithInterval(timings.CommandsRepeatInterval),
+				)
+			}
+			return true
+		})
+	}()
+
+	wg.Wait()
+}
+
 func (s *Syncer) syncPlayers(
 	ctx context.Context,
 	srcUpdate *playerUpdate,
 ) {
-	s.logger.Info("-- Syncing caused by %d update: %s", srcUpdate.player.id, srcUpdate.update)
+	s.logger.Info("-- Syncing caused by %d update: %s", srcUpdate.player.GetID(), srcUpdate.update.String())
 	commands := srcUpdate.GetSyncCommands()
 	s.syncOtherPlayersNoSeek(ctx, srcUpdate, commands)
-	if commands.Seek.HasValue {
+	if commands.Seek.HasValue && s.players.Len() > 1 {
 		var skipPlayer *player
 		if !s.settings.GetReSeekSrc().GetValue() {
 			skipPlayer = srcUpdate.player
 		}
 		s.syncPlayersPosition(ctx, commands.Seek.Value, skipPlayer)
 	}
-	s.lastSyncedAt = time.Now()
+	s.state.acceptFollowerUpdatesAfter = time.Now().Add(s.followersSkipUpdatesDuration)
 }
 
 func (s *Syncer) syncOtherPlayersNoSeek(
@@ -215,7 +287,7 @@ func (s *Syncer) syncOtherPlayersNoSeek(
 		dstUpdate.ChangedProps.SetPosition(false)
 
 		if err == nil && !srcUpdate.update.ChangedProps.Includes(dstUpdate.ChangedProps) {
-			s.logger.Info("P[%d]: additional sync [%s] -> [%s]", pl.id, srcUpdate.update, dstUpdate)
+			s.logger.Info("P[%d]: additional sync [%s] -> [%s]", pl.GetID(), srcUpdate.update, dstUpdate)
 			dstCommands = srcUpdate.player.client.state.GetSyncCommands(
 				srcUpdate.update.ChangedProps.Union(dstUpdate.ChangedProps),
 			)
@@ -224,14 +296,7 @@ func (s *Syncer) syncOtherPlayersNoSeek(
 		waitGr.Add(1)
 		go func() {
 			defer waitGr.Done()
-			for {
-				if _, shouldRepeat := pl.SendCmdGroup(ctx, dstCommands); !shouldRepeat || ctx.Err() != nil {
-					return
-				}
-				if err := timeutil.SleepCtx(ctx, timings.CommandsRepeatInterval); err != nil {
-					return
-				}
-			}
+			_, _ = pl.SendCmdGroup(ctx, dstCommands, repetition.WithInterval(timings.CommandsRepeatInterval))
 		}()
 		return true
 	})
@@ -247,24 +312,33 @@ func (s *Syncer) syncPlayersPosition(
 		Seek: typeutil.NewOptional(positionGetter),
 	}
 
-	allSeeked := atomic.Bool{}
-	for !allSeeked.Load() {
-		waitGr := sync.WaitGroup{}
-		allSeeked.Store(true)
+	for {
+		wg := sync.WaitGroup{}
+		var hasNotRecoverableErr, hasRecoverableErr atomic.Bool
+		hasNotRecoverableErr.Store(false)
+		hasRecoverableErr.Store(false)
 
 		s.players.Iterate(func(pl *player) bool {
 			if pl == skipPlayer {
 				return true
 			}
-			waitGr.Add(1)
+			wg.Add(1)
 			go func() {
-				defer waitGr.Done()
-				if _, shouldRepeat := pl.SendCmdGroup(ctx, commands); shouldRepeat {
-					allSeeked.Store(false)
+				defer wg.Done()
+				if _, err := pl.SendCmdGroup(ctx, commands, repetition.Single()); err != nil {
+					s.logger.Err("Failed to sync position: %s", err.Error())
+					if pl.IsRecoverableErr(err) {
+						hasRecoverableErr.Store(true)
+					} else {
+						hasNotRecoverableErr.Store(true)
+					}
 				}
 			}()
 			return true
 		})
-		waitGr.Wait()
+		wg.Wait()
+		if ctx.Err() != nil || !hasRecoverableErr.Load() || hasNotRecoverableErr.Load() {
+			return
+		}
 	}
 }

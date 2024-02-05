@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/cardinalby/vlc-sync-play/internal/app/static_features"
 	"github.com/cardinalby/vlc-sync-play/pkg/util/rx"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic/protocols"
 )
@@ -39,7 +40,7 @@ func (s *Settings) SetDefaults() {
 	s.InstancesNumber.SetValue(2)
 	s.NoVideo.SetValue(false)
 	s.PollingInterval.SetValue(100 * time.Millisecond)
-	s.ClickPause.SetValue(true)
+	s.ClickPause.SetValue(static_features.ClickPause)
 	s.ReSeekSrc.SetValue(true)
 }
 
@@ -72,6 +73,10 @@ func (s *Settings) Validate() error {
 	}
 	if s.PollingInterval.GetValue() < 0 {
 		return errors.New("polling interval should be positive")
+	}
+	if //goland:noinspection GoBoolExpressions
+	s.ClickPause.GetValue() && !static_features.ClickPause {
+		return errors.New("click pause is not supported")
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cardinalby/vlc-sync-play/internal/app/static_features"
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/slices"
 
@@ -19,7 +20,9 @@ func BuildRoot(settings *app.Settings) tview.Primitive {
 	addNoVideo(form, settings)
 	addReSeekSrc(form, settings)
 	addPollingInterval(form, settings)
-	addClickPause(form, settings)
+	if static_features.ClickPause {
+		addClickPause(form, settings)
+	}
 
 	form.SetBorder(true).
 		SetTitle("Settings").

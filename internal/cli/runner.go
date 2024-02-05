@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/cardinalby/vlc-sync-play/internal/app"
-	"github.com/cardinalby/vlc-sync-play/internal/cli/args"
+	"github.com/cardinalby/vlc-sync-play/internal/args"
 	"github.com/cardinalby/vlc-sync-play/internal/cli/debug"
 	"github.com/cardinalby/vlc-sync-play/internal/cli/interactive"
 	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
@@ -25,7 +25,7 @@ func RunCliApp(ctx context.Context) error {
 	}
 
 	var cliApp cliApp
-	if cmdLineArgs.Debug != nil && *cmdLineArgs.Debug {
+	if cmdLineArgs.Debug {
 		cliApp = debug.NewApp(logging.NewLogger(os.Stdout))
 	} else {
 		cliApp = interactive.NewApp(logging.NewNopLogger())

@@ -10,77 +10,95 @@ import (
 )
 
 type players struct {
-	items         []*player
-	mu            sync.RWMutex
-	waitCtx       context.Context
-	waitErrGroup  *errgroup.Group
-	onUpdate      func(playerUpdate)
-	onPlayerEvent func(playerEvent)
+	items        map[*player]struct{}
+	mu           sync.RWMutex
+	waitCtx      context.Context
+	waitErrGroup *errgroup.Group
+	onUpdate     func(playerUpdate)
+	onEvent      func(playerEvent)
+	onFinish     func(*player)
 }
 
-func newPlayers(items ...*player) *players {
+func newPlayers() *players {
 	return &players{
-		items: items,
+		items: make(map[*player]struct{}),
 		mu:    sync.RWMutex{},
 	}
 }
 
-func (s *players) Len() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.items)
+func (pls *players) Len() int {
+	pls.mu.RLock()
+	defer pls.mu.RUnlock()
+	return len(pls.items)
 }
 
-func (s *players) Add(item *player) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.items = append(s.items, item)
-	if s.waitErrGroup != nil {
-		onEvent := func(event instance.StdErrEvent) {
-			s.onPlayerEvent(playerEvent{event: event, player: item})
-		}
-		item.StartWaiting(s.waitCtx, s.waitErrGroup.Go, s.onUpdate, onEvent)
+func (pls *players) Add(item *player) {
+	pls.mu.Lock()
+	defer pls.mu.Unlock()
+	pls.items[item] = struct{}{}
+	if pls.waitErrGroup != nil {
+		pls.startWaitingForPlayer(item)
 	}
 }
 
-func (s *players) Iterate(yield func(*player) (next bool)) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for i := 0; i < len(s.items); i++ {
-		if !yield(s.items[i]) {
+func (pls *players) Iterate(yield func(*player) (next bool)) {
+	pls.mu.RLock()
+	players := make([]*player, 0, len(pls.items))
+	for pl := range pls.items {
+		players = append(players, pl)
+	}
+	pls.mu.RUnlock()
+
+	for _, item := range players {
+		if !yield(item) {
 			break
 		}
 	}
 }
 
-func (s *players) WaitAndPoll(
+func (pls *players) WaitAndPoll(
 	ctx context.Context,
 	onUpdate func(update playerUpdate),
-	onPlayerEvent func(event playerEvent),
+	onEvent func(event playerEvent),
+	onFinish func(*player),
 ) error {
-	s.mu.Lock()
-	if s.waitErrGroup != nil {
+	pls.mu.Lock()
+	if pls.waitErrGroup != nil {
 		return errors.New("already waiting")
 	}
 
-	s.onUpdate = onUpdate
-	s.onPlayerEvent = onPlayerEvent
-	s.waitErrGroup, s.waitCtx = errgroup.WithContext(ctx)
+	pls.onUpdate = onUpdate
+	pls.onEvent = onEvent
+	pls.onFinish = onFinish
+	pls.waitErrGroup, pls.waitCtx = errgroup.WithContext(ctx)
 
-	for _, pl := range s.items {
-		onEvent := func(event instance.StdErrEvent) {
-			onPlayerEvent(playerEvent{event: event, player: pl})
-		}
-		pl.StartWaiting(s.waitCtx, s.waitErrGroup.Go, onUpdate, onEvent)
+	for pl := range pls.items {
+		pls.startWaitingForPlayer(pl)
 	}
-	s.mu.Unlock()
+	pls.mu.Unlock()
 
-	err := s.waitErrGroup.Wait()
+	err := pls.waitErrGroup.Wait()
 
-	s.mu.Lock()
-	s.waitCtx = nil
-	s.waitErrGroup = nil
-	s.mu.Unlock()
+	pls.mu.Lock()
+	pls.waitCtx = nil
+	pls.waitErrGroup = nil
+	pls.mu.Unlock()
 
 	return err
+}
+
+func (pls *players) startWaitingForPlayer(pl *player) {
+	pls.waitErrGroup.Go(func() error {
+		err := pl.WaitAndPoll(pls.waitCtx, pls.onUpdate, pls.onEvent, pls.onFinish)
+		pls.mu.Lock()
+		defer pls.mu.Unlock()
+		delete(pls.items, pl)
+		if !errors.Is(err, instance.ErrInstanceFinished) {
+			return err
+		}
+		if len(pls.items) == 0 {
+			return ErrAllInstancesFinished
+		}
+		return nil
+	})
 }

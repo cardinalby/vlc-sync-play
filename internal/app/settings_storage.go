@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"time"
 
-	errutil "github.com/cardinalby/vlc-sync-play/pkg/util/err"
+	"github.com/cardinalby/vlc-sync-play/internal/app/static_features"
+	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
 	"github.com/cardinalby/vlc-sync-play/pkg/util/rx"
 	typeutil "github.com/cardinalby/vlc-sync-play/pkg/util/type"
 	"github.com/kirsle/configdir"
@@ -37,7 +39,7 @@ func (s *jsonSettings) applyToAppSettings(settings *Settings) (updated bool) {
 		settings.PollingInterval.SetValue(time.Duration(*s.PollingIntervalMs) * time.Millisecond)
 		updated = true
 	}
-	if s.ClickPause != nil {
+	if s.ClickPause != nil && static_features.ClickPause {
 		settings.ClickPause.SetValue(*s.ClickPause)
 		updated = true
 	}
@@ -52,7 +54,9 @@ func (s *jsonSettings) setFromAppSettings(settings *Settings) {
 	s.InstancesNumber = typeutil.Ptr(settings.InstancesNumber.GetValue())
 	s.NoVideo = typeutil.Ptr(settings.NoVideo.GetValue())
 	s.PollingIntervalMs = typeutil.Ptr(settings.PollingInterval.GetValue().Milliseconds())
-	s.ClickPause = typeutil.Ptr(settings.ClickPause.GetValue())
+	if static_features.ClickPause {
+		s.ClickPause = typeutil.Ptr(settings.ClickPause.GetValue())
+	}
 	s.ReSeekSrc = typeutil.Ptr(settings.ReSeekSrc.GetValue())
 }
 
@@ -61,13 +65,15 @@ type SettingsStorage struct {
 	isFileCreated  bool
 	settings       *Settings
 	jsonSettings   *jsonSettings // can be nil
+	logger         logging.Logger
 }
 
-func NewSettingsStorage(settings *Settings) *SettingsStorage {
+func NewSettingsStorage(settings *Settings, logger logging.Logger) *SettingsStorage {
 	return &SettingsStorage{
 		configFilePath: filepath.Join(configdir.LocalConfig(Name), settingsFileName),
 		settings:       settings,
 		jsonSettings:   new(jsonSettings),
+		logger:         logger,
 	}
 }
 
@@ -76,6 +82,7 @@ func (s *SettingsStorage) GetSettings() *Settings {
 }
 
 func (s *SettingsStorage) Load() (loaded bool, err error) {
+	s.logger.Info("config location: %s", s.configFilePath)
 	fh, err := os.Open(s.configFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -85,7 +92,7 @@ func (s *SettingsStorage) Load() (loaded bool, err error) {
 	}
 
 	defer func() {
-		err = errutil.Join(err, fh.Close())
+		err = errors.Join(err, fh.Close())
 	}()
 
 	decoder := json.NewDecoder(fh)
@@ -112,10 +119,12 @@ func (s *SettingsStorage) StartSyncing(ctx context.Context) error {
 		s.jsonSettings.PollingIntervalMs = typeutil.Ptr(v.Milliseconds())
 		s.saveJsonSettingsWithErrChan(syncErrCh)
 	}))
-	observers = append(observers, s.settings.ClickPause.Subscribe(func(v bool) {
-		s.jsonSettings.ClickPause = &v
-		s.saveJsonSettingsWithErrChan(syncErrCh)
-	}))
+	if static_features.ClickPause {
+		observers = append(observers, s.settings.ClickPause.Subscribe(func(v bool) {
+			s.jsonSettings.ClickPause = &v
+			s.saveJsonSettingsWithErrChan(syncErrCh)
+		}))
+	}
 	observers = append(observers, s.settings.ReSeekSrc.Subscribe(func(v bool) {
 		s.jsonSettings.ReSeekSrc = &v
 		s.saveJsonSettingsWithErrChan(syncErrCh)
@@ -140,12 +149,12 @@ func (s *SettingsStorage) saveJsonSettings() (err error) {
 	var f *os.File
 	defer func() {
 		if f != nil {
-			err = errutil.Join(err, f.Close())
+			err = errors.Join(err, f.Close())
 		}
 	}()
 
 	if f, err = s.openFileForWrite(); err != nil {
-		return err
+		return fmt.Errorf("error opening file: %w", err)
 	}
 	encoder := json.NewEncoder(f)
 	return encoder.Encode(&s.jsonSettings)
@@ -161,16 +170,21 @@ func (s *SettingsStorage) saveJsonSettingsWithErrChan(errChan chan<- error) {
 }
 
 func (s *SettingsStorage) openFileForWrite() (*os.File, error) {
-	for {
-		f, err := os.OpenFile(s.configFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-		if err == nil {
-			return f, nil
-		}
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		if err := configdir.MakePath(path.Dir(s.configFilePath)); err != nil {
-			return nil, err
-		}
+	openFile := func() (*os.File, error) {
+		return os.OpenFile(s.configFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	}
+
+	f, err := openFile()
+	if err == nil {
+		return f, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	if err := configdir.MakePath(filepath.Dir(s.configFilePath)); err != nil {
+		return nil, fmt.Errorf("error creating settings dir: %w", err)
+	}
+
+	return openFile()
 }

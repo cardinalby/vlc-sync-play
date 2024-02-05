@@ -5,12 +5,13 @@ import (
 	"sync"
 	"time"
 
+	urlutil "github.com/cardinalby/vlc-sync-play/pkg/url"
 	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
 	mathutil "github.com/cardinalby/vlc-sync-play/pkg/util/math"
 	timeutil "github.com/cardinalby/vlc-sync-play/pkg/util/time"
 	typeutil "github.com/cardinalby/vlc-sync-play/pkg/util/type"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic"
-	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/timings"
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/extended/repetition"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -23,48 +24,44 @@ type lastStatusPart struct {
 }
 
 type Client struct {
-	api            basic.ApiClient
-	mu             sync.Mutex
-	statusRespTime *mathutil.AvgAcc[time.Duration]
-	lastStatusPart typeutil.Optional[lastStatusPart]
-	logger         logging.Logger
+	api                      basic.ApiClient
+	mu                       sync.Mutex
+	statusRespTime           *mathutil.AvgAcc[time.Duration]
+	lastStatusPart           typeutil.Optional[lastStatusPart]
+	getInstanceFinishedError func() error
+	isInstanceFinishedError  func(error) bool
+	logger                   logging.Logger
 }
 
-func CreateClientWaitOnline(
-	ctx context.Context,
+func NewClient(
 	api basic.ApiClient,
+	getInstanceFinishedError func() error,
+	isInstanceFinishedError func(error) bool,
 	logger logging.Logger,
-) (*Client, error) {
-	client := &Client{
-		api:            api,
-		statusRespTime: mathutil.NewAvgAcc[time.Duration](respTimeSamplesCount),
-		logger:         logger,
+) *Client {
+	return &Client{
+		api:                      api,
+		statusRespTime:           mathutil.NewAvgAcc[time.Duration](respTimeSamplesCount),
+		getInstanceFinishedError: getInstanceFinishedError,
+		isInstanceFinishedError:  isInstanceFinishedError,
+		logger:                   logger,
 	}
-	if err := client.waitUntilOnline(ctx); err != nil {
-		return nil, err
-	}
-	return client, nil
 }
 
-func (c *Client) GetStatusEx(ctx context.Context) (basic.StatusEx, error) {
-	status, err := c.api.GetStatus(ctx)
+func (c *Client) GetStatusEx(ctx context.Context, rule repetition.Rule) (basic.StatusEx, error) {
+	status, err := c.getStatus(ctx, rule)
 
 	if err == nil {
-		return c.getStatusEx(ctx, status)
+		return c.addFileURIToStatus(ctx, status, rule)
 	}
 	return basic.StatusEx{}, err
 }
 
-func (c *Client) SendStatusCmd(ctx context.Context, cmd basic.Command) (basic.StatusEx, error) {
-	status, err := c.api.SendStatusCmd(ctx, cmd)
-	if err == nil {
-		res, err := c.getStatusEx(ctx, status)
-		return res, err
-	}
-	return basic.StatusEx{}, err
-}
-
-func (c *Client) SendCmdGroup(ctx context.Context, group CmdGroup) (res *basic.StatusEx, err error) {
+func (c *Client) SendCmdGroup(
+	ctx context.Context,
+	group CmdGroup,
+	rule repetition.Rule,
+) (res *basic.StatusEx, err error) {
 	resMu := sync.Mutex{}
 	updateRes := func(statusEx basic.StatusEx, err error) error {
 		if err == nil {
@@ -81,40 +78,39 @@ func (c *Client) SendCmdGroup(ctx context.Context, group CmdGroup) (res *basic.S
 		targetFileURI := group.OpenFile.Value
 		cmd := group.GetOpenFileCmd()
 
-		statusEx, err := c.SendStatusCmd(ctx, cmd)
+		statusEx, err := c.sendStatusCmd(ctx, cmd, rule)
 		if err := updateRes(statusEx, err); err != nil {
 			return nil, err
 		}
-
-		// Ensure that file is opened
-		for statusEx.FileURI != targetFileURI {
-			if err := timeutil.SleepCtx(ctx, timings.StatusClarificationInterval); err != nil {
-				return nil, err
-			}
-			statusEx, err = c.GetStatusEx(ctx)
+		clarificationStartedAt := time.Now()
+		// Ensure that file is opened. It can be not reported as opened in the first request.
+		// Also, VLC may go crazy if you send next commands immediately
+		for !urlutil.EqualIgnoreSchema(statusEx.FileURI, targetFileURI) {
+			statusEx, err = c.GetStatusEx(ctx, repetition.Single())
 			if err := updateRes(statusEx, err); err != nil {
 				return nil, err
 			}
 		}
+		c.logger.Info("File opened in %s", time.Since(clarificationStartedAt).String())
 	}
 
 	errGr, ctx := errgroup.WithContext(ctx)
 
 	if isNotStopped && group.Seek.HasValue {
 		errGr.Go(func() error {
-			return updateRes(c.SendStatusCmd(ctx, group.GetSeekCmd(c.getCmdExpectedExecutionTime())))
+			return updateRes(c.sendStatusCmd(ctx, group.GetSeekCmd(c.getCmdExpectedExecutionTime()), rule))
 		})
 	}
 
 	if isNotStopped && group.Rate.HasValue {
 		errGr.Go(func() error {
-			return updateRes(c.SendStatusCmd(ctx, group.GetRateCmd()))
+			return updateRes(c.sendStatusCmd(ctx, group.GetRateCmd(), rule))
 		})
 	}
 
 	if cmd := group.GetStateCmd(); cmd != nil {
 		errGr.Go(func() error {
-			return updateRes(c.SendStatusCmd(ctx, cmd))
+			return updateRes(c.sendStatusCmd(ctx, cmd, rule))
 		})
 	}
 
@@ -130,7 +126,11 @@ func (c *Client) getCmdExpectedExecutionTime() time.Time {
 	return time.Now()
 }
 
-func (c *Client) getStatusEx(ctx context.Context, status basic.Status) (basic.StatusEx, error) {
+func (c *Client) addFileURIToStatus(
+	ctx context.Context,
+	status basic.Status,
+	rule repetition.Rule,
+) (basic.StatusEx, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -145,7 +145,7 @@ func (c *Client) getStatusEx(ctx context.Context, status basic.Status) (basic.St
 			fileURI = ""
 		} else {
 			var err error
-			if fileURI, err = c.api.GetCurrentFileUri(ctx); err != nil {
+			if fileURI, err = c.getCurrentFileUri(ctx, rule); err != nil {
 				return basic.StatusEx{}, err
 			}
 		}
@@ -164,22 +164,53 @@ func (c *Client) getStatusEx(ctx context.Context, status basic.Status) (basic.St
 }
 
 func (c *Client) IsRecoverableErr(err error) bool {
-	return c.api.IsRecoverableErr(err)
+	return c.api.IsRecoverableErr(err) && !c.isInstanceFinishedError(err)
 }
 
-func (c *Client) waitUntilOnline(ctx context.Context) error {
-	c.logger.Info("* waiting until online")
+func (c *Client) getStatus(
+	ctx context.Context,
+	rule repetition.Rule,
+) (status basic.Status, err error) {
+	err = c.apiCall(ctx, func() error {
+		status, err = c.api.GetStatus(ctx)
+		return err
+	}, rule)
+	return status, err
+}
+
+func (c *Client) getCurrentFileUri(ctx context.Context, rule repetition.Rule) (fileURI string, err error) {
+	err = c.apiCall(ctx, func() error {
+		fileURI, err = c.api.GetCurrentFileUri(ctx)
+		return err
+	}, rule)
+	return fileURI, err
+}
+
+func (c *Client) sendStatusCmd(
+	ctx context.Context,
+	cmd basic.Command,
+	rule repetition.Rule,
+) (statusEx basic.StatusEx, err error) {
+	var status basic.Status
+	if err = c.apiCall(ctx, func() error {
+		status, err = c.api.SendStatusCmd(ctx, cmd)
+		return err
+	}, rule); err != nil {
+		return statusEx, err
+	}
+	return c.addFileURIToStatus(ctx, status, rule)
+}
+
+func (c *Client) apiCall(ctx context.Context, apiAction func() error, rule repetition.Rule) error {
 	for {
-		status, err := c.api.GetStatus(ctx)
+		err := apiAction()
 		if err == nil {
-			c.statusRespTime.Add(status.Moment.Length())
-			c.logger.Info(" * online")
 			return nil
 		}
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if !c.IsRecoverableErr(err) || !rule.Interval.HasValue {
+			return err
 		}
-		if err := timeutil.SleepCtx(ctx, timings.WaitUntilOnlinePollingInterval); err != nil {
+		if err := timeutil.SleepCtx(ctx, rule.Interval.Value); err != nil {
 			return err
 		}
 	}

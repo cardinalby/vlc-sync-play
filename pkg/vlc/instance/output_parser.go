@@ -63,11 +63,14 @@ func NewOutputParser(
 	pipe io.ReadCloser,
 	eventsToParse EventsToParse,
 ) *OutputParser {
-	return &OutputParser{
-		scanner:           bufio.NewScanner(pipe),
+	parser := &OutputParser{
 		eventsToParse:     eventsToParse,
 		mouse1downCounter: timeutil.NewTtlCounter(waitForMouseUpTimeout),
 	}
+	if pipe != nil {
+		parser.scanner = bufio.NewScanner(pipe)
+	}
+	return parser
 }
 
 func (p *OutputParser) SetEventsToParse(events EventsToParse) {
@@ -77,6 +80,9 @@ func (p *OutputParser) SetEventsToParse(events EventsToParse) {
 }
 
 func (p *OutputParser) Start(ctx context.Context, onEvent func(event StdErrEvent)) error {
+	if p.scanner == nil {
+		return nil
+	}
 	for p.scanner.Scan() {
 		if ctx.Err() != nil {
 			return ctx.Err()

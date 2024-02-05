@@ -16,9 +16,12 @@ import (
 	rndutil "github.com/cardinalby/vlc-sync-play/pkg/util/rnd"
 	timeutil "github.com/cardinalby/vlc-sync-play/pkg/util/time"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic"
+	playlist_dto "github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic/httpjson/dto/playlist"
+	status_dto "github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic/httpjson/dto/status"
 )
 
 var ErrFormingRequest = errors.New("failed to form a request")
+var ErrParsingResponse = errors.New("failed to parse response")
 var ErrAuthFailed = errors.New("authentication failed")
 
 const passwordLength = 6
@@ -40,14 +43,13 @@ func NewLocalBasicApiClient(logger logging.Logger) (*BasicApiClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get free port: %w", err)
 	}
-	return newBasicApiClient(
-		ConnectionInfo{
-			Host:     host,
-			Port:     port,
-			Password: password,
-		},
-		logger,
-	), nil
+	connectionInfo := ConnectionInfo{
+		Host:     host,
+		Port:     port,
+		Password: password,
+	}
+	logger.Info("Connection to VLC json api: %s", connectionInfo.String())
+	return newBasicApiClient(connectionInfo, logger), nil
 }
 
 func newBasicApiClient(
@@ -64,7 +66,7 @@ func newBasicApiClient(
 }
 
 func (apiClient *BasicApiClient) GetStatus(ctx context.Context) (basic.Status, error) {
-	statusDto, moment, err := sendApiRequest[statusDto](
+	statusDto, moment, err := sendApiRequest[status_dto.Status](
 		ctx,
 		apiClient,
 		apiEndpointStatus,
@@ -78,7 +80,7 @@ func (apiClient *BasicApiClient) GetStatus(ctx context.Context) (basic.Status, e
 
 func (apiClient *BasicApiClient) SendStatusCmd(ctx context.Context, cmd basic.Command) (basic.Status, error) {
 	apiClient.logger.Info("CMD %s %v\n", apiClient.baseUrl, cmd)
-	statusDto, moment, err := sendApiRequest[statusDto](
+	statusDto, moment, err := sendApiRequest[status_dto.Status](
 		ctx,
 		apiClient,
 		apiEndpointStatus,
@@ -91,7 +93,7 @@ func (apiClient *BasicApiClient) SendStatusCmd(ctx context.Context, cmd basic.Co
 }
 
 func (apiClient *BasicApiClient) GetCurrentFileUri(ctx context.Context) (string, error) {
-	playlistItemDto, _, err := sendApiRequest[playlistItemDto](
+	playlistUnmarshaller, _, err := sendApiRequest[*playlist_dto.VersionsUnmarshaller](
 		ctx,
 		apiClient,
 		apiEndpointPlaylist,
@@ -100,7 +102,9 @@ func (apiClient *BasicApiClient) GetCurrentFileUri(ctx context.Context) (string,
 	if err != nil {
 		return "", err
 	}
-	currentItem, hasCurrent := playlistItemDto.getCurrent()
+
+	currentItem, hasCurrent := playlistUnmarshaller.ItemDto.GetCurrent()
+	apiClient.logger.Info("Current playlist item: %v", currentItem.Uri)
 	if !hasCurrent {
 		return "", nil
 	}
@@ -108,7 +112,9 @@ func (apiClient *BasicApiClient) GetCurrentFileUri(ctx context.Context) (string,
 }
 
 func (apiClient *BasicApiClient) IsRecoverableErr(err error) bool {
-	return !(errors.Is(err, ErrFormingRequest) && !errors.Is(err, ErrAuthFailed))
+	return !(errors.Is(err, ErrFormingRequest) &&
+		!errors.Is(err, ErrAuthFailed)) &&
+		!errors.Is(err, ErrParsingResponse)
 }
 
 func (apiClient *BasicApiClient) GetLaunchArgs() []string {
@@ -165,19 +171,22 @@ func sendApiRequest[T any](
 	}
 
 	if err := json.Unmarshal(data, &response); err != nil {
-		return response, moment, fmt.Errorf("error unmarshalling response: %w", err)
+		return response, moment, fmt.Errorf(
+			"%w: error unmarshalling response: %s. Response: %s",
+			ErrParsingResponse, err.Error(), string(data),
+		)
 	}
 
 	return response, moment, nil
 }
 
-func toStatus(dto statusDto, moment timeutil.Range) basic.Status {
+func toStatus(dto status_dto.Status, moment timeutil.Range) basic.Status {
 	return basic.Status{
 		Moment:    moment,
 		LengthSec: dto.LengthSec,
 		Rate:      dto.Rate,
 		State:     dto.State,
 		Position:  dto.Position,
-		FileName:  dto.getFileName(),
+		FileName:  dto.GetFileName(),
 	}
 }

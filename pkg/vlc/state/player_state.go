@@ -169,9 +169,13 @@ func (s *State) GetExpectedPosition() extended.ExpectedPositionGetter {
 	return func(atMoment time.Time) float64 {
 		timeSincePrev := timeutil.NewRangeWithLen(atMoment, 0).SubRange(prevMoment)
 
-		return prevPositionRange.AddRange(
-			timeSincePrev.ToFloat64().MultiplyF(durationToPosMultiplier),
-		).Center()
+		return mathutil.Clamp(
+			prevPositionRange.AddRange(
+				timeSincePrev.ToFloat64().MultiplyF(durationToPosMultiplier),
+			).Center(),
+			0,
+			1,
+		)
 	}
 }
 
@@ -180,8 +184,8 @@ func (s *State) applyNewStatus(new *basic.StatusEx) {
 		return // old status
 	}
 
-	if (!s.prev.HasValue && new.FileURI != "") ||
-		(s.prev.HasValue && s.prev.Value.FileURI != new.FileURI) {
+	if new.FileURI != "" && (!s.prev.HasValue ||
+		(s.prev.HasValue && s.prev.Value.FileURI != new.FileURI)) {
 		// a new file opened
 		s.prev.Set(*new)
 		s.fileJustOpened = true
@@ -228,7 +232,7 @@ func (s *State) getUpdateFromPrev(new *basic.StatusEx) (Update, error) {
 		return upd, errOlderThenPrevious
 	}
 
-	if new.FileURI != prev.FileURI {
+	if new.FileURI != prev.FileURI && new.FileURI != "" {
 		upd.ChangedProps.SetFileURI(true)
 		return upd, nil
 	}

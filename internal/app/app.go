@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	errutil "github.com/cardinalby/vlc-sync-play/pkg/util/err"
 	"github.com/cardinalby/vlc-sync-play/pkg/util/logging"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/instance"
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/instance/vlc_path"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/syncer"
 	"golang.org/x/sync/errgroup"
 )
@@ -42,15 +42,14 @@ func (a *App) Start(ctx context.Context) (err error) {
 	}
 	settings := a.settingsStorage.GetSettings()
 
-	instanceLauncher := instance.GetLauncher(settings.VlcPath, settings.ApiProtocol, a.logger)
-	masterInstance, err := instanceLauncher(ctx, instance.LaunchOptions{
-		FilePaths: settings.FilePaths,
-	})
-	if err != nil {
-		return err
+	instanceLauncher := instance.NewLauncher(settings.VlcPath, settings.ApiProtocol, a.logger)
+
+	var filePath string
+	if len(settings.FilePaths) > 0 {
+		filePath = settings.FilePaths[0]
 	}
+
 	playersSyncer := syncer.NewSyncer(
-		masterInstance,
 		settings,
 		instanceLauncher,
 		a.logger,
@@ -61,8 +60,8 @@ func (a *App) Start(ctx context.Context) (err error) {
 
 	errGroup.Go(func() error {
 		defer settingsSyncCtxCancel()
-		err := playersSyncer.Start(ctx)
-		if errors.Is(err, ctx.Err()) || errors.Is(err, syncer.ErrInstanceFinished) {
+		err := playersSyncer.Start(ctx, filePath)
+		if errors.Is(err, ctx.Err()) || errors.Is(err, syncer.ErrAllInstancesFinished) {
 			return nil
 		}
 		return err
@@ -70,25 +69,30 @@ func (a *App) Start(ctx context.Context) (err error) {
 	errGroup.Go(func() error {
 		return a.settingsStorage.StartSyncing(settingsSyncCtx)
 	})
-	return errGroup.Wait()
+	err = errGroup.Wait()
+	if err != nil {
+		a.logger.Err("syncer error: %s", err.Error())
+	}
+	return err
 }
 
 func (a *App) createSettingsStorage(settingsPatch SettingsPatch) (*SettingsStorage, error) {
 	settings := NewSettings()
 	settings.SetDefaults()
 
-	settingsStorage := NewSettingsStorage(settings)
+	settingsStorage := NewSettingsStorage(settings, a.logger.WithPrefix("settings"))
+
 	if _, loadErr := settingsStorage.Load(); loadErr != nil {
 		a.logger.Err("error loading settings: %s", loadErr.Error())
 		if saveErr := settingsStorage.Save(); saveErr != nil {
-			return nil, errutil.Join(loadErr, saveErr)
+			return nil, errors.Join(loadErr, saveErr)
 		}
 	} else {
 		if validateErr := settings.Validate(); validateErr != nil {
 			a.logger.Err("error validating loaded settings: %s", validateErr.Error())
 			settings.SetDefaults()
 			if saveErr := settingsStorage.Save(); saveErr != nil {
-				return nil, errutil.Join(validateErr, saveErr)
+				return nil, errors.Join(validateErr, saveErr)
 			}
 		}
 	}
@@ -99,7 +103,7 @@ func (a *App) createSettingsStorage(settingsPatch SettingsPatch) (*SettingsStora
 		}
 	}
 	if settings.VlcPath == "" {
-		if defaultPath, err := instance.GetDefaultVlcBinPath(); err == nil {
+		if defaultPath, err := vlc_path.GetDefaultVlcBinPath(); err == nil {
 			settings.VlcPath = defaultPath
 		} else {
 			return nil, fmt.Errorf("error getting default VLC path: %w", err)

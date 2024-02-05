@@ -10,29 +10,18 @@ import (
 	typeutil "github.com/cardinalby/vlc-sync-play/pkg/util/rx"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/basic"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/extended"
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/extended/repetition"
+	"github.com/cardinalby/vlc-sync-play/pkg/vlc/client/timings"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/instance"
 	"github.com/cardinalby/vlc-sync-play/pkg/vlc/state"
+	"golang.org/x/sync/errgroup"
 )
 
-var ErrInstanceFinished = errors.New("instance finished")
-var ErrInstanceFailed = errors.New("instance failed")
-
-type playerSettings struct {
-	pollingInterval typeutil.Observable[time.Duration]
-	stdErrEvents    typeutil.Observable[instance.EventsToParse]
-}
-
-type player struct {
-	id       uint
-	instance instance.Instance
-	client   *Client
-	settings playerSettings
-}
+var ErrAllInstancesFinished = errors.New("all instances finished")
 
 type playerUpdate struct {
 	player *player
 	update state.Update
-	status basic.StatusEx
 }
 
 type playerEvent struct {
@@ -44,56 +33,93 @@ func (pu *playerUpdate) GetSyncCommands() extended.CmdGroup {
 	return pu.player.client.state.GetSyncCommands(pu.update.ChangedProps)
 }
 
+type playerSettings struct {
+	pollingInterval typeutil.Observable[time.Duration]
+	stdErrEvents    typeutil.Observable[instance.EventsToParse]
+}
+
+type player struct {
+	instance *instance.Instance
+	client   *PollingClient
+	settings playerSettings
+}
+
 func newPlayer(
-	instance instance.Instance,
+	instance *instance.Instance,
 	settings playerSettings,
-	logger logging.Logger,
-	id uint,
+	parentLogger logging.Logger,
 ) *player {
 	return &player{
 		instance: instance,
 		client: newClient(
 			instance.Client,
 			settings.pollingInterval,
-			logger.WithPrefix(fmt.Sprintf("P[%d]", id)),
+			parentLogger.WithPrefix(fmt.Sprintf("P[%d]", instance.ID)),
 		),
 		settings: settings,
 	}
 }
 
-func (pl *player) StartWaiting(
+func (pl *player) WaitAndPoll(
 	ctx context.Context,
-	goroutineRunner func(func() error),
 	onUpdate func(update playerUpdate),
-	onStderrEvent func(event instance.StdErrEvent),
-) {
+	onEvent func(event playerEvent),
+	onFinish func(*player),
+) error {
 	pl.instance.SetEventsToParse(pl.settings.stdErrEvents.GetValue())
-	stdErrEventsObserver := pl.settings.stdErrEvents.Subscribe(func(events instance.EventsToParse) {
+	defer pl.settings.stdErrEvents.Subscribe(func(events instance.EventsToParse) {
 		pl.instance.SetEventsToParse(events)
-	})
+	}).Unsubscribe()
 
-	goroutineRunner(func() error {
-		err := pl.instance.Wait(ctx, onStderrEvent)
-		stdErrEventsObserver.Unsubscribe()
-		if err != nil {
-			return fmt.Errorf("%w: %s", ErrInstanceFailed, err.Error())
-		}
-		return ErrInstanceFinished
+	errGr, ctx := errgroup.WithContext(ctx)
+
+	errGr.Go(func() error {
+		err := pl.instance.Wait(ctx, func(event instance.StdErrEvent) {
+			onEvent(playerEvent{event: event, player: pl})
+		})
+		onFinish(pl)
+		return err
 	})
-	goroutineRunner(func() error {
-		return pl.client.StartPolling(ctx, func(update state.Update) {
-			onUpdate(playerUpdate{
-				player: pl,
-				update: update,
-			})
+	errGr.Go(func() error {
+		return pl.client.StartPolling(ctx, func(stateUpdate state.Update) {
+			pl.onUpdate(stateUpdate, onUpdate)
 		})
 	})
+
+	return errGr.Wait()
 }
 
 func (pl *player) SendCmdGroup(
 	ctx context.Context,
 	cmdGroup extended.CmdGroup,
-) (statusEx *basic.StatusEx, shouldRepeat bool) {
-	statusEx, shouldRepeat = pl.client.SendCmdGroup(ctx, cmdGroup)
-	return statusEx, shouldRepeat && pl.instance.IsRunning()
+	rule repetition.Rule,
+) (statusEx *basic.StatusEx, err error) {
+	return pl.client.SendCmdGroup(ctx, cmdGroup, rule)
+}
+
+func (pl *player) onUpdate(stateUpdate state.Update, notify func(playerUpdate)) {
+	if stateUpdate.ChangedProps.HasState() && stateUpdate.Status.State == basic.PlaybackStateStopped {
+		// "stopped" state can be caused by player instance shutdown (reproduces mainly on Windows).
+		// If player is not shut down soon, send update as normal, skip update otherwise
+		// to avoid stopping all players.
+		timer := time.NewTimer(timings.WaitForShutdownAfterStopDuration)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-pl.instance.Finished():
+			return
+		}
+	}
+	notify(playerUpdate{
+		player: pl,
+		update: stateUpdate,
+	})
+}
+
+func (pl *player) IsRecoverableErr(err error) bool {
+	return pl.client.IsRecoverableErr(err)
+}
+
+func (pl *player) GetID() uint {
+	return pl.instance.ID
 }

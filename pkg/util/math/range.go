@@ -56,8 +56,8 @@ func (r Range[T]) Intersection(other Range[T]) (Range[T], bool) {
 		return Range[T]{}, false
 	}
 	return Range[T]{
-		Min: Max(r.Min, other.Min),
-		Max: Min(r.Max, other.Max),
+		Min: max(r.Min, other.Min),
+		Max: min(r.Max, other.Max),
 	}, true
 }
 
@@ -72,14 +72,14 @@ func (r Range[T]) IsValid() bool {
 func (r Range[T]) CapMax(cap T) Range[T] {
 	return Range[T]{
 		Min: r.Min,
-		Max: Min(r.Max, cap),
+		Max: min(r.Max, cap),
 	}
 }
 
 func (r Range[T]) CapLen(maxLength T) Range[T] {
 	return Range[T]{
 		Min: r.Min,
-		Max: Min(r.Max, r.Min+maxLength),
+		Max: min(r.Max, r.Min+maxLength),
 	}
 }
 
