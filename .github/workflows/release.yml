@@ -17,8 +17,8 @@ jobs:
           go-version-file: 'go.mod'
 
       - run: go mod download
-      - run: go test ./...
       - run: go generate ./...
+      - run: go test ./...
       - run: bash build.sh
 
       - name: Create a Release
