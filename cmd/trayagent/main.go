@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	_ "github.com/cardinalby/vlc-sync-play/cmd/internal"
 	"github.com/cardinalby/vlc-sync-play/internal/app"
 	"github.com/cardinalby/vlc-sync-play/internal/args"
 	"github.com/cardinalby/vlc-sync-play/internal/trayagent"

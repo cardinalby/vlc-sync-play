@@ -1,0 +1,82 @@
+name: test
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - run: go mod download
+      - run: go test ./...
+      - run: go generate ./...
+      - run: bash build.sh
+
+      - name: Create a Release
+        id: create_release
+        uses: shogo82148/actions-create-release@v1
+
+      - name: Upload Windows amd64 binary
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/windows_amd64/vlc-sync-play.exe
+          asset_name: vlc-sync-play_win_x64.exe
+          asset_content_type: application/vnd.microsoft.portable-executable
+
+      - name: Upload MacOS amd64 dmg
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/darwin_amd64/vlc-sync-play.dmg
+          asset_name: vlc-sync-play_intel.dmg
+          asset_content_type: application/x-apple-diskimage
+
+      - name: Upload MacOS arm64 dmg
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/darwin_arm64/vlc-sync-play.dmg
+          asset_name: vlc-sync-play_apple_silicon.dmg
+          asset_content_type: application/x-apple-diskimage
+
+      - name: Upload Linux x64 bin
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/linux_amd64/vlc-sync-play
+          asset_name: vlc-sync-play_linux_x64
+          asset_content_type: application/x-executable
+
+      - name: Upload Linux x64 deb
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/linux_amd64/vlc-sync-play.deb
+          asset_name: vlc-sync-play_linux_x64.deb
+          asset_content_type: application/vnd.debian.binary-package
+
+      - name: Upload Linux arm64 bin
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/linux_arm64/vlc-sync-play
+          asset_name: vlc-sync-play_linux_arm64
+          asset_content_type: application/x-executable
+
+      - name: Upload Linux arm64 deb
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/linux_arm64/vlc-sync-play.deb
+          asset_name: vlc-sync-play_linux_arm64.deb
+          asset_content_type: application/vnd.debian.binary-package

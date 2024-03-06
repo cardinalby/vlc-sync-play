@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	_ "github.com/cardinalby/vlc-sync-play/cmd/internal"
 	"github.com/cardinalby/vlc-sync-play/internal/cli"
 )
 

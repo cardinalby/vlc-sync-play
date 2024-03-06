@@ -8,7 +8,7 @@ import "embed"
 var IconFS embed.FS
 
 func GetTrayIcon() []byte {
-	data, err := IconFS.ReadFile("icons/tray_icon.png")
+	data, err := IconFS.ReadFile("generated/tray_icon.png")
 	if err != nil {
 		panic(err)
 	}

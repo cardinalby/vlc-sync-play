@@ -1,5 +1,4 @@
 #!/bin/bash
 
-bash ./go_generate.sh
-#cd build/cmd || exit
-#VLCSP_ROOT="../.." go run .
+go install github.com/cardinalby/xgo-pack
+xgo-pack build

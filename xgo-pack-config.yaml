@@ -1,0 +1,55 @@
+$schema: https://raw.githubusercontent.com/cardinalby/xgo-pack/master/config_schema/config.schema.v1.json
+presets:
+  - xgo-pack:tray_icon
+dist_dir: dist
+tmp_dir: dist/tmp
+src:
+  main_pkg: cmd/trayagent
+  icon: assets/icons/icon.psd[0]
+targets:
+  common:
+    identifier: com.github.cardinalby.vlc-sync-play
+    bin_name: vlc-sync-play
+    product_name: VLC Sync Play
+    version: 1.0.0
+    copyright: © 2024, cardinalby
+  windows:
+    amd64:
+      out_dir: windows_amd64
+      build_bin: true # Build and keep binary
+  macos:
+    common:
+      bundle:
+        bundle_name: vlc-sync-play.app
+      dmg:
+        dmg_name: vlc-sync-play.dmg
+    arm64:
+      out_dir: darwin_arm64
+      build_bin: true # Build and keep binary
+      build_bundle: true # Build and keep app bundle
+      build_dmg: true # Build and keep dmg image with bundle
+    amd64:
+      out_dir: darwin_amd64
+      build_bin: true # Build and keep binary
+      build_bundle: true # Build and keep app bundle
+      build_dmg: true # Build and keep dmg image with bundle
+  linux:
+    common:
+      deb:
+        deb_name: vlc-sync-play.deb
+        name: vlc-sync-play
+        maintainer: https://github.com/cardinalby
+        dst_bin_path: /usr/bin/vlc-sync-play
+        desktop_entry:
+          add_desktop_entry: true
+          add_icon: true
+          dst_icon_path: /usr/share/icons/com.github.cardinalby.vlc-sync-play.png
+          name: vlc-sync-play
+    arm64:
+      out_dir: linux_arm64
+      build_bin: true # Build and keep binary
+      build_deb: true # Build and keep deb package
+    amd64:
+      out_dir: linux_amd64
+      build_bin: true # Build and keep binary
+      build_deb: true # Build and keep deb package
