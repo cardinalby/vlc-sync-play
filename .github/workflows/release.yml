@@ -34,32 +34,12 @@ jobs:
           asset_name: vlc-sync-play_win_x64.exe
           asset_content_type: application/vnd.microsoft.portable-executable
 
-      - name: Pack MacOS amd64 bundle
-        run: zip -r -q dist/darwin_amd64/vlc-sync-play.app.zip dist/darwin_amd64/vlc-sync-play.app
-
-      - name: Upload MacOS amd64 app bundle
-        uses: shogo82148/actions-upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/darwin_amd64/vlc-sync-play.app.zip
-          asset_name: vlc-sync-play_MacOS_intel.app.zip
-
       - name: Upload MacOS amd64 dmg
         uses: shogo82148/actions-upload-release-asset@v1
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: dist/darwin_amd64/vlc-sync-play.dmg
           asset_name: vlc-sync-play_MacOS_intel.dmg
-
-      - name: Pack MacOS arm64 bundle
-        run: zip -r -q dist/darwin_arm64/vlc-sync-play.app.zip dist/darwin_arm64/vlc-sync-play.app
-
-      - name: Upload MacOS arm64 app bundle
-        uses: shogo82148/actions-upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/darwin_arm64/vlc-sync-play.app.zip
-          asset_name: vlc-sync-play_MacOS_apple_silicon.app.zip
 
       - name: Upload MacOS arm64 dmg
         uses: shogo82148/actions-upload-release-asset@v1

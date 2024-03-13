@@ -13,6 +13,8 @@ targets:
     product_name: VLC Sync Play
     version: 1.0.0
     copyright: © 2024, cardinalby
+    go_build:
+      trimpath: true
   windows:
     amd64:
       out_dir: windows_amd64
