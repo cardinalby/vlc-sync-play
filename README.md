@@ -2,7 +2,7 @@
 
 The easiest way to synchronize multiple VLC players playback.
 
-## Why I need this?
+## Why do I need this?
 
 I created it to watch movies with my girlfriend on one screen but listening to 2 different audio tracks.
 Each of us has a pair of earphones and each listens to its own audio track. 
